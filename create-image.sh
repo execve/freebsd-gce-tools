@@ -50,55 +50,55 @@ PACKAGES=''
 
 # Switches
 while getopts ":chk:K:p:P:r:s:w:u:vz" opt; do
-  case $opt in
-  	c)
+	case $opt in
+  		c)
 			COMPRESS='YES'
 			;;
-    h)
-      usage
-      exit 0
-      ;;
-    k)
-      PUBKEYFILE="${OPTARG}"
-      ;;
-    K)
+    	h)
+			usage
+			exit 0
+			;;
+    	k)
+			PUBKEYFILE="${OPTARG}"
+			;;
+    	K)
 			PRIKEYFILE="${OPTARG}"
 			;;
-    p)
-      NEWPASS="${OPTARG}"
-      ;;
-    P)
-      PACKAGES="${OPTARG}"
-      ;;
-    r)
-      RELEASE="${OPTARG}"
-      ;;
-    s)
-      IMAGESIZE="${OPTARG}"
-      ;;
-    w)
-      SWAPSIZE="${OPTARG}"
-      ;;
-    u)
-      NEWUSER="${OPTARG}"
-      ;;
-    v)
+    	p)
+			NEWPASS="${OPTARG}"
+			;;
+    	P)
+			PACKAGES="${OPTARG}"
+			;;
+    	r)
+			RELEASE="${OPTARG}"
+			;;
+    	s)
+			IMAGESIZE="${OPTARG}"
+			;;
+    	w)
+			SWAPSIZE="${OPTARG}"
+			;;
+    	u)
+			NEWUSER="${OPTARG}"
+			;;
+    	v)
 			VERBOSE="YES"
 			echo "Verbose output enabled."
 			;;
-    z)
-      USEZFS='YES'
-      FILETYPE='ZFS'
-      ;;
-    \?)
-      echo "Invalid option: -${OPTARG}" >&2
-      exit 1
-      ;;
-    :)
-      echo "Option -${OPTARG} requires an argument." >&2
-      exit 1
-      ;;
-  esac
+    	z)
+			USEZFS='YES'
+			FILETYPE='ZFS'
+			;;
+    	\?)
+			echo "Invalid option: -${OPTARG}" >&2
+			exit 1
+			;;
+    	:)
+			echo "Option -${OPTARG} requires an argument." >&2
+			exit 1
+			;;
+	esac
 done
 shift $((OPTIND-1))
 
@@ -416,6 +416,6 @@ else
 	shasum "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img" > "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img.sha"
 fi
 
-[ ${VERBOSE} ] && echo "Started at $(date '+%Y-%m-%d %r')"
+[ ${VERBOSE} ] && echo "Finished at $(date '+%Y-%m-%d %r')"
 
 echo "Done."
