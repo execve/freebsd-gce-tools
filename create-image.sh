@@ -11,15 +11,14 @@ usage() {
 		-h This help
 
 		-c Compress the image.
-		-k Path to public key for new user.  Will be added to authorized_keys so you can log in.  Required.
-		-K Path to private key.  Implies install public and private keys for new user.
-		-p Password for new user.  Default: passw0rd.
+		-k Path to public key for new user.  Will be added to authorized_keys so you can log in. Required.
+		-p Password for the root user. Required.
 		-P Packages to install, in a space-separated string (you will need to use quotes).
-		-r Release of FreeBSD to use.  Default: 10.2-RELEASE
+		-r Release of FreeBSD to use.  Default: 10.3-RELEASE
 		-s Image size.  Specify units as G or M.  Default: 2G.
 		-w Swap size.  Specify in same units as Image size.  Added to image size.  Default none.
-		-u Username for new user.  Default: gceuser.
 		-z Use ZFS filesystem for root.
+		-i Create uploadable GCE image (.tar.gz containing disk.raw file)
 		"
 }
 
@@ -32,7 +31,7 @@ fi
 # Defaults
 VERBOSE=''
 COMPRESS=''
-IMAGESIZE='2G'
+IMAGESIZE='10G'
 SWAPSIZE=''
 DEVICEID=''
 RELEASE='10.3-RELEASE'
@@ -40,61 +39,57 @@ RELEASEDIR=''
 TMPMNTPNT=''
 TMPCACHE=''
 TMPMNTPREFIX='freebsd-gce-tools-tmp'
-NEWUSER='gceuser'
-NEWPASS='passw0rd'
+NEWPASS=''
 PUBKEYFILE=''
-PRIKEYFILE=''
 USEZFS=''
 FILETYPE='UFS'
 PACKAGES=''
+TAR_IMAGE=''
 
 # Switches
-while getopts ":chk:K:p:P:r:s:w:u:vz" opt; do
+while getopts ":chk:p:P:r:s:w:vzi" opt; do
 	case $opt in
-  		c)
+		c)
 			COMPRESS='YES'
 			;;
-    	h)
+		h)
 			usage
 			exit 0
 			;;
-    	k)
+		k)
 			PUBKEYFILE="${OPTARG}"
 			;;
-    	K)
-			PRIKEYFILE="${OPTARG}"
-			;;
-    	p)
+		p)
 			NEWPASS="${OPTARG}"
 			;;
-    	P)
+		P)
 			PACKAGES="${OPTARG}"
 			;;
-    	r)
+		r)
 			RELEASE="${OPTARG}"
 			;;
-    	s)
+		s)
 			IMAGESIZE="${OPTARG}"
 			;;
-    	w)
+		w)
 			SWAPSIZE="${OPTARG}"
 			;;
-    	u)
-			NEWUSER="${OPTARG}"
-			;;
-    	v)
+		v)
 			VERBOSE="YES"
 			echo "Verbose output enabled."
 			;;
-    	z)
+		z)
 			USEZFS='YES'
 			FILETYPE='ZFS'
 			;;
-    	\?)
+		i)
+			TAR_IMAGE='YES'
+			;;
+		\?)
 			echo "Invalid option: -${OPTARG}" >&2
 			exit 1
 			;;
-    	:)
+		:)
 			echo "Option -${OPTARG} requires an argument." >&2
 			exit 1
 			;;
@@ -104,11 +99,6 @@ shift $((OPTIND-1))
 
 # Infrastructure Checks
 echo " "
-if [ -n "${PRIKEYFILE}" ] && [ -z "${PUBKEYFILE}" ]; then
-	echo "If you provide a private key file, a public key file is also required."
-	usage
-	exit 1
-fi
 if [ -z "${PUBKEYFILE}" ]; then
 	echo "A public key file is required.  You will need this key to log in to your instance when you launch it."
 	usage
@@ -116,16 +106,6 @@ if [ -z "${PUBKEYFILE}" ]; then
 fi
 if [ ! -f "${PUBKEYFILE}" ]; then
 	echo "Cannot read public key file: ${PUBKEYFILE}"
-	usage
-	exit 1
-fi
-if [ -z "${PUBKEYFILE}" ] && [ ! -f "${PRIKEYFILE}" ]; then
-	echo "Cannot read private key file: ${PRIKEYFILE}"
-	usage
-	exit 1
-fi
-if [ -z "${NEWUSER}" ]; then
-	echo "New username for the image cannot be empty."
 	usage
 	exit 1
 fi
@@ -184,27 +164,19 @@ if [ $USEZFS ]; then
 	echo "Creating ZFS boot root partitions..."
 	gpart create -s gpt "${DEVICEID}"
 	gpart add -a 4k -s 512k -t freebsd-boot "${DEVICEID}"
-	gpart add -a 4k -t freebsd-zfs -l "${ZLABEL}" "${DEVICEID}"
+	gpart add -a 4k -t freebsd-zfs -l ${ZLABEL} "${DEVICEID}"
 	gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 1 "${DEVICEID}"
 
 	echo "Creating zroot pool..."
-	gnop create -S 4096 "/dev/gpt/${ZLABEL}"
-	zpool create -f -o altroot="${TMPMNTPNT}" -o cachefile="${TMPCACHE}/zpool.cache" "${ZNAME}" "/dev/gpt/${ZLABEL}.nop"
-	zpool export "${ZNAME}"
-	gnop destroy "/dev/gpt/${ZLABEL}.nop"
-	zpool import -o altroot="${TMPMNTPNT}" -o cachefile="${TMPCACHE}/zpool.cache" "${ZNAME}"
-	mount | grep "${ZNAME}"
+	gnop create -S 4096 /dev/gpt/${ZLABEL}
+	zpool create -f -o altroot=${TMPMNTPNT} -o cachefile=${TMPCACHE}/zpool.cache ${ZNAME} /dev/gpt/${ZLABEL}.nop
+	zpool export ${ZNAME}
+	gnop destroy /dev/gpt/${ZLABEL}.nop
+	zpool import -o altroot=${TMPMNTPNT} -o cachefile=${TMPCACHE}/zpool.cache ${ZNAME}
+	mount | grep ${ZNAME}
 
 	echo "Setting ZFS properties..."
 	zpool set bootfs="${ZNAME}" "${ZNAME}"
-	# zpool set listsnapshots=on ${ZNAME}
-	# zpool set autoreplace=on ${ZNAME}
-	# #zpool set autoexpand=on ${ZNAME}
-	# zfs set checksum=fletcher4 ${ZNAME}
-	# zfs set compression=lz4 ${ZNAME}
-	# zfs set atime=off ${ZNAME}
-	# zfs set copies=2 ${ZNAME}
-	# #zfs set mountpoint=/ ${ZNAME}
 
 	if [ -n "${SWAPSIZE}" ]; then
 		echo "Adding swap space..."
@@ -292,30 +264,14 @@ kern.geom.label.gptid.enable="0"
 __EOF__
 fi
 
-# Configure new user
-echo "Creating ${NEWUSER} and home dir..."
-echo "$NEWPASS" | pw -V "$TMPMNTPNT/etc" useradd -h 0 -n "$NEWUSER" -c "$NEWUSER" -s /bin/csh -m
-pw -V "$TMPMNTPNT/etc" groupmod wheel -m "$NEWUSER"
-NEWUSER_UID=$(pw -V "$TMPMNTPNT/etc" usershow "$NEWUSER" | cut -f 3 -d :)
-NEWUSER_GID=$(pw -V "$TMPMNTPNT/etc" usershow "$NEWUSER" | cut -f 4 -d :)
-NEWUSER_HOME=$TMPMNTPNT/home/$NEWUSER
-mkdir -p "$NEWUSER_HOME"
-chown "$NEWUSER_UID":"$NEWUSER_GID" "$NEWUSER_HOME"
-
-## Set SSH authorized keys && optionally install key pair
-echo "Setting authorized ssh key for ${NEWUSER}..."
-mkdir "$NEWUSER_HOME/.ssh"
-chmod -R 700 "$NEWUSER_HOME/.ssh"
-cat "${PUBKEYFILE}" > "$NEWUSER_HOME/.ssh/authorized_keys"
-chmod 644 "$NEWUSER_HOME/.ssh/authorized_keys"
-if [ -n "${PRIKEYFILE}" ]; then
-	echo "Installing ssh key pair for ${NEWUSER}..."
-	cp "${PUBKEYFILE}" "$NEWUSER_HOME/.ssh/"
-	chmod 644 "$NEWUSER_HOME/.ssh/$( basename "${PUBKEYFILE}" )"
-	cp "${PRIKEYFILE}" "$NEWUSER_HOME/.ssh/"
-	chmod 600 "$NEWUSER_HOME/.ssh/$( basename "${PRIKEYFILE}" )"
-fi
-chown -R "$NEWUSER_UID":"$NEWUSER_GID" "$NEWUSER_HOME/.ssh"
+# Configure the root user
+echo "$NEWPASS" | pw -V "$TMPMNTPNT/etc" usermod root -h 0
+echo "Setting authorized ssh key for root..."
+mkdir "$TMPMNTPNT/root/.ssh"
+chmod -R 700 "$TMPMNTPNT/root/.ssh"
+touch "$TMPMNTPNT/root/.ssh/authorized_keys"
+chmod 644 "$TMPMNTPNT/root/.ssh/authorized_keys"
+cat "${PUBKEYFILE}" > "$TMPMNTPNT/root/.ssh/authorized_keys"
 
 # Config File Changes
 echo "Configuring image for GCE..."
@@ -344,16 +300,22 @@ echo -Dh > "$TMPMNTPNT/boot.config"
 ### /boot/loader.conf
 cat >> "$TMPMNTPNT/boot/loader.conf" << __EOF__
 # GCE Console
-console="comconsole"
-# No Boot Delay
-autoboot_delay="0"
+console="comconsole,vidconsole"
+autoboot_delay="-1"
+beastie_disable="YES"
+loader_logo="none"
+hw.memtest.tests="0"
+hw.vtnet.mq_disable=1
+kern.timecounter.hardware=ACPI-safe
+aesni_load="YES"
+nvme_load="YES"
 __EOF__
 
 ## /etc/rc.conf
 cat >> "$TMPMNTPNT/etc/rc.conf" << __EOF__
 console="comconsole"
 hostname="freebsd"
-ifconfig_vtnet0="DHCP"
+ifconfig_DEFAULT="SYNCDHCP mtu 1460"
 ntpd_enable="YES"
 ntpd_sync_on_start="YES"
 sshd_enable="YES"
@@ -362,6 +324,7 @@ __EOF__
 ## /etc/ssh/sshd_config
 /usr/bin/sed -Ei.original 's/^#UseDNS yes/UseDNS no/' "$TMPMNTPNT/etc/ssh/sshd_config"
 /usr/bin/sed -Ei '' 's/^#UsePAM yes/UsePAM no/' "$TMPMNTPNT/etc/ssh/sshd_config"
+/usr/bin/sed -Ei '' 's/^#PermitRootLogin no/PermitRootLogin without-password/' "$TMPMNTPNT/etc/ssh/sshd_config"
 
 ## /etc/ntp.conf > /usr/local/etc/ntp.conf
 cp "$TMPMNTPNT/etc/ntp.conf" "$TMPMNTPNT/usr/local/etc/ntp.conf"
@@ -407,13 +370,24 @@ fi
 mdconfig -d -u "${DEVICEID}"
 
 # Name/Compress the image
-mv temporary.img "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img"
+FINAL_IMAGE_NAME="FreeBSD-GCE-${RELEASE}-${FILETYPE}.img"
+mv temporary.img "${FINAL_IMAGE_NAME}"
+
+if [ ${TAR_IMAGE} ]; then
+	echo "Creating uploadable GCE Disk Image..."
+	mkdir image
+	cp "${FINAL_IMAGE_NAME}" "image/disk.raw"
+	cd image && gtar -Sczf "../${FINAL_IMAGE_NAME}-DISK-IMAGE.tar.gz" disk.raw && cd ..
+	rm -r image
+	shasum "${FINAL_IMAGE_NAME}-DISK-IMAGE.tar.gz" > "${FINAL_IMAGE_NAME}-DISK-IMAGE.tar.gz.sha"
+fi
+
 if [ ${COMPRESS} ]; then
 	echo "Compressing image..."
-	gzip "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img"
-	shasum "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img.gz" > "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img.gz.sha"
+	gzip "${FINAL_IMAGE_NAME}"
+	shasum "${FINAL_IMAGE_NAME}.gz" > "${FINAL_IMAGE_NAME}.gz.sha"
 else
-	shasum "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img" > "FreeBSD-GCE-${RELEASE}-${FILETYPE}.img.sha"
+	shasum "${FINAL_IMAGE_NAME}" > "${FINAL_IMAGE_NAME}.sha"
 fi
 
 [ ${VERBOSE} ] && echo "Finished at $(date '+%Y-%m-%d %r')"
