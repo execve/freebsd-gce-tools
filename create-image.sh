@@ -10,25 +10,13 @@ usage() {
 
 		-h This help
 
-		-c Compress the image.
-		-k Path to public key for new user.  Will be added to authorized_keys so you can log in. Required.
-		-p Password for the root user. Required.
-		-P Packages to install, in a space-separated string (you will need to use quotes).
-		-r Release of FreeBSD to use.  Default: 10.3-RELEASE
-		-s Image size.  Specify units as G or M.  Default: 2G.
-		-w Swap size.  Specify in same units as Image size.  Added to image size.  Default none.
-		-z Use ZFS filesystem for root.
-		-i Create uploadable GCE image (.tar.gz containing disk.raw file)
+		-c Path to a config file (default: profile-default.conf)
+		-v Be verbose
 		"
 }
 
-# Show usage if no parameters
-if [ -z "$1" ]; then
-	usage
-	exit 0
-fi
-
 # Defaults
+CONFIG_PROFILE='profile-default.conf'
 VERBOSE=''
 COMPRESS=''
 IMAGESIZE='10G'
@@ -47,43 +35,18 @@ PACKAGES=''
 TAR_IMAGE=''
 
 # Switches
-while getopts ":chk:p:P:r:s:w:vzi" opt; do
+while getopts "c:hv" opt; do
 	case $opt in
 		c)
-			COMPRESS='YES'
+			CONFIG_PROFILE="${OPTARG}"
 			;;
 		h)
 			usage
 			exit 0
 			;;
-		k)
-			PUBKEYFILE="${OPTARG}"
-			;;
-		p)
-			NEWPASS="${OPTARG}"
-			;;
-		P)
-			PACKAGES="${OPTARG}"
-			;;
-		r)
-			RELEASE="${OPTARG}"
-			;;
-		s)
-			IMAGESIZE="${OPTARG}"
-			;;
-		w)
-			SWAPSIZE="${OPTARG}"
-			;;
 		v)
 			VERBOSE="YES"
 			echo "Verbose output enabled."
-			;;
-		z)
-			USEZFS='YES'
-			FILETYPE='ZFS'
-			;;
-		i)
-			TAR_IMAGE='YES'
 			;;
 		\?)
 			echo "Invalid option: -${OPTARG}" >&2
@@ -97,22 +60,34 @@ while getopts ":chk:p:P:r:s:w:vzi" opt; do
 done
 shift $((OPTIND-1))
 
-# Infrastructure Checks
-echo " "
-if [ -z "${PUBKEYFILE}" ]; then
-	echo "A public key file is required.  You will need this key to log in to your instance when you launch it."
-	usage
+# Check and source config file
+if [ ! -f "${CONFIG_PROFILE}" ]; then
+	echo "Can't read config profile ${CONFIG_PROFILE}!"
 	exit 1
 fi
-if [ ! -f "${PUBKEYFILE}" ]; then
+
+. "${CONFIG_PROFILE}"
+
+[ ${VERBOSE} ] && echo "Using config profile ${CONFIG_PROFILE}"
+
+# Sanity check of the options
+if [ ! -z "${PUBKEYFILE}" -a ! -f "${PUBKEYFILE}" ]; then
 	echo "Cannot read public key file: ${PUBKEYFILE}"
-	usage
 	exit 1
 fi
 if [ -z "${NEWPASS}" ]; then
+	stty -echo
+	printf "Password for 'root': "
+	read NEWPASS
+	stty echo
+	echo ''
+fi
+if [ -z "${NEWPASS}" ]; then
 	echo "New password for the image cannot be empty."
-	usage
 	exit 1
+fi
+if [ -z "${USEZFS}" ]; then
+	FILETYPE='ZFS'
 fi
 
 # Check for root credentials
@@ -121,7 +96,7 @@ if [ "$(whoami)" != "root" ]; then
 	exit 1
 fi
 
-[ ${VERBOSE} ] && echo "Started at $(date date '+%Y-%m-%d %r')"
+[ ${VERBOSE} ] && echo "Started at $(date '+%Y-%m-%d %r')"
 
 # Size Setup
 if [ -n "${SWAPSIZE}" ]; then
@@ -266,12 +241,15 @@ fi
 
 # Configure the root user
 echo "$NEWPASS" | pw -V "$TMPMNTPNT/etc" usermod root -h 0
-echo "Setting authorized ssh key for root..."
-mkdir "$TMPMNTPNT/root/.ssh"
-chmod -R 700 "$TMPMNTPNT/root/.ssh"
-touch "$TMPMNTPNT/root/.ssh/authorized_keys"
-chmod 644 "$TMPMNTPNT/root/.ssh/authorized_keys"
-cat "${PUBKEYFILE}" > "$TMPMNTPNT/root/.ssh/authorized_keys"
+
+if [ ! -z "${PUBKEYFILE}" ]; then
+	echo "Setting authorized ssh key for root..."
+	mkdir "$TMPMNTPNT/root/.ssh"
+	chmod -R 700 "$TMPMNTPNT/root/.ssh"
+	touch "$TMPMNTPNT/root/.ssh/authorized_keys"
+	chmod 644 "$TMPMNTPNT/root/.ssh/authorized_keys"
+	cat "${PUBKEYFILE}" > "$TMPMNTPNT/root/.ssh/authorized_keys"
+fi
 
 # Config File Changes
 echo "Configuring image for GCE..."
@@ -379,15 +357,11 @@ if [ ${TAR_IMAGE} ]; then
 	cp "${FINAL_IMAGE_NAME}" "image/disk.raw"
 	cd image && gtar -Sczf "../${FINAL_IMAGE_NAME}-DISK-IMAGE.tar.gz" disk.raw && cd ..
 	rm -r image
-	shasum "${FINAL_IMAGE_NAME}-DISK-IMAGE.tar.gz" > "${FINAL_IMAGE_NAME}-DISK-IMAGE.tar.gz.sha"
 fi
 
 if [ ${COMPRESS} ]; then
 	echo "Compressing image..."
 	gzip "${FINAL_IMAGE_NAME}"
-	shasum "${FINAL_IMAGE_NAME}.gz" > "${FINAL_IMAGE_NAME}.gz.sha"
-else
-	shasum "${FINAL_IMAGE_NAME}" > "${FINAL_IMAGE_NAME}.sha"
 fi
 
 [ ${VERBOSE} ] && echo "Finished at $(date '+%Y-%m-%d %r')"
