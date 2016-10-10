@@ -33,6 +33,7 @@ USEZFS=''
 FILETYPE='UFS'
 PACKAGES=''
 TAR_IMAGE=''
+COMPONENTS='base kernel doc games lib32'
 
 # Switches
 while getopts "c:hv" opt; do
@@ -71,14 +72,14 @@ fi
 [ ${VERBOSE} ] && echo "Using config profile ${CONFIG_PROFILE}"
 
 # Sanity check of the options
-if [ ! -z "${PUBKEYFILE}" -a ! -f "${PUBKEYFILE}" ]; then
+if [ ! -z "${PUBKEYFILE}" ] && [ ! -f "${PUBKEYFILE}" ]; then
 	echo "Cannot read public key file: ${PUBKEYFILE}"
 	exit 1
 fi
 if [ -z "${NEWPASS}" ]; then
 	stty -echo
 	printf "Password for 'root': "
-	read NEWPASS
+	read -r NEWPASS
 	stty echo
 	echo ''
 fi
@@ -139,16 +140,16 @@ if [ $USEZFS ]; then
 	echo "Creating ZFS boot root partitions..."
 	gpart create -s gpt "${DEVICEID}"
 	gpart add -a 4k -s 512k -t freebsd-boot "${DEVICEID}"
-	gpart add -a 4k -t freebsd-zfs -l ${ZLABEL} "${DEVICEID}"
+	gpart add -a 4k -t freebsd-zfs -l "${ZLABEL}" "${DEVICEID}"
 	gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 1 "${DEVICEID}"
 
 	echo "Creating zroot pool..."
-	gnop create -S 4096 /dev/gpt/${ZLABEL}
-	zpool create -f -o altroot=${TMPMNTPNT} -o cachefile=${TMPCACHE}/zpool.cache ${ZNAME} /dev/gpt/${ZLABEL}.nop
-	zpool export ${ZNAME}
-	gnop destroy /dev/gpt/${ZLABEL}.nop
-	zpool import -o altroot=${TMPMNTPNT} -o cachefile=${TMPCACHE}/zpool.cache ${ZNAME}
-	mount | grep ${ZNAME}
+	gnop create -S 4096 "/dev/gpt/${ZLABEL}"
+	zpool create -f -o altroot="${TMPMNTPNT}" -o cachefile="${TMPCACHE}/zpool.cache" "${ZNAME}" "/dev/gpt/${ZLABEL}.nop"
+	zpool export "${ZNAME}"
+	gnop destroy "/dev/gpt/${ZLABEL}.nop"
+	zpool import -o altroot="${TMPMNTPNT}" -o cachefile="${TMPCACHE}/zpool.cache" "${ZNAME}"
+	mount | grep "${ZNAME}"
 
 	echo "Setting ZFS properties..."
 	zpool set bootfs="${ZNAME}" "${ZNAME}"
@@ -167,13 +168,13 @@ else
 	# Partition the image
 	echo "Adding partitions..."
 	gpart create -s gpt "/dev/${DEVICEID}"
-	echo -n "Adding boot: "
+	printf "Adding boot: "
 	gpart add -s 222 -t freebsd-boot -l boot0 "${DEVICEID}"
-	echo -n "Adding root: "
-	gpart add -t freebsd-ufs -s "${IMAGESIZE}" -l root0 "${DEVICEID}"
+	printf "Adding root: "
+	gpart add -t freebsd-ufs -l root0 "${DEVICEID}"
 	gpart bootcode -b /boot/pmbr -p /boot/gptboot -i 1 "${DEVICEID}"
 	if [ -n "${SWAPSIZE}" ]; then
-		echo -n "Adding swap: "
+		printf "Adding swap: "
 		gpart add -t freebsd-swap -l swap0 "${DEVICEID}"
 	fi
 
@@ -187,36 +188,34 @@ fi
 # Fetch FreeBSD into the image
 RELEASEDIR="FETCH_${RELEASE}"
 mkdir -p "${RELEASEDIR}"
-if [ ! -f "${RELEASEDIR}/base.txz" ]; then
-	echo "Fetching base..."
-	fetch -q -o "${RELEASEDIR}/base.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/base.txz" < /dev/tty
+
+BASE_INSTALLED=''
+KERNEL_INSTALLED=''
+
+for cmp in $COMPONENTS; do
+	if [ "${cmp}" != "base" ] && [ "${cmp}" != "doc" ] && [ "${cmp}" != "games" ] &&
+	   [ "${cmp}" != "kernel" ] && [ "${cmp}" != "lib32" ]; then
+		echo "Unknown system component ${cmp}. Skipping."
+	else
+		if [ ! -f "${RELEASEDIR}/${cmp}.txz" ]; then
+			echo "Fetching ${cmp}..."
+			fetch -q -o "${RELEASEDIR}/${cmp}.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/${cmp}.txz" < /dev/tty
+		fi
+		echo "Extracting ${cmp}..."
+		tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/${cmp}.txz" < /dev/tty
+	fi
+
+	if [ "${cmp}" = "base" ]; then BASE_INSTALLED="YES"; fi
+	if [ "${cmp}" = "kernel" ]; then KERNEL_INSTALLED="YES"; fi
+done
+
+if [ -z "${KERNEL_INSTALLED}" ]; then
+	echo "You have ommited the kernel. Hope you know what are you doing."
 fi
-echo "Extracting base..."
-tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/base.txz" < /dev/tty
-if [ ! -f "${RELEASEDIR}/doc.txz" ]; then
-	echo "Fetching doc..."
-	fetch -q -o "${RELEASEDIR}/doc.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/doc.txz" < /dev/tty
+
+if [ -z "${BASE_INSTALLED}" ]; then
+	echo "You have ommited the base. Good luck."
 fi
-echo "Extracting doc..."
-tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/doc.txz" < /dev/tty
-if [ ! -f "${RELEASEDIR}/games.txz" ]; then
-	echo "Fetching games..."
-	fetch -q -o "${RELEASEDIR}/games.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/games.txz" < /dev/tty
-fi
-echo "Extracting games..."
-tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/games.txz" < /dev/tty
-if [ ! -f "${RELEASEDIR}/kernel.txz" ]; then
-	echo "Fetching kernel..."
-	fetch -q -o "${RELEASEDIR}/kernel.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/kernel.txz" < /dev/tty
-fi
-echo "Extracting kernel..."
-tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/kernel.txz" < /dev/tty
-if [ ! -f "${RELEASEDIR}/lib32.txz" ]; then
-	echo "Fetching lib32..."
-	fetch -q -o "${RELEASEDIR}/lib32.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/lib32.txz" < /dev/tty
-fi
-echo "Extracting lib32..."
-tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/lib32.txz" < /dev/tty
 
 # ZFS on Root Configuration
 if [ $USEZFS ]; then
