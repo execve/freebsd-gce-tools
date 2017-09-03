@@ -1,5 +1,11 @@
 #!/bin/sh
 
+# XXX TODO
+# + Handle timezone in a better manner
+# + Encrypted swap!
+# + Encrypted disks - ZFS on GELI
+# + Cleanup routine with trap 
+
 # Stop for errors
 set -e
 
@@ -19,21 +25,24 @@ usage() {
 CONFIG_PROFILE='profile-default.conf'
 VERBOSE=''
 COMPRESS=''
-IMAGESIZE='10G'
+IMAGESIZE='2G'
 SWAPSIZE=''
 DEVICEID=''
-RELEASE='10.3-RELEASE'
+RELEASE='11.1-RELEASE'
 RELEASEDIR=''
 TMPMNTPNT=''
 TMPCACHE=''
 TMPMNTPREFIX='freebsd-gce-tools-tmp'
-NEWPASS=''
+NEWUSER='gce-user'
+NEWPASS='pAssw0rb'			# default passworb
+ROOTPASS=''				# default is empty to force user choice
 PUBKEYFILE=''
 USEZFS=''
 FILETYPE='UFS'
 PACKAGES=''
 TAR_IMAGE=''
-COMPONENTS='base kernel doc games lib32'
+HOSTNAME='bsdbox'
+COMPONENTS='base kernel doc lib32'
 
 # Switches
 while getopts "c:hv" opt; do
@@ -61,6 +70,9 @@ while getopts "c:hv" opt; do
 done
 shift $((OPTIND-1))
 
+echo "Not fully tested, press ENTER to continue!"
+read junkvar
+
 # Check and source config file
 if [ ! -f "${CONFIG_PROFILE}" ]; then
 	echo "Can't read config profile ${CONFIG_PROFILE}!"
@@ -76,12 +88,21 @@ if [ ! -z "${PUBKEYFILE}" ] && [ ! -f "${PUBKEYFILE}" ]; then
 	echo "Cannot read public key file: ${PUBKEYFILE}"
 	exit 1
 fi
-if [ -z "${NEWPASS}" ]; then
+if [ -z "${NEWUSER}" ]; then
+	echo "New username for the image cannot be empty."
+	usage
+	exit 1
+fi
+if [ -z "${ROOTPASS}" ]; then
 	stty -echo
 	printf "Password for 'root': "
-	read -r NEWPASS
+	read -r ROOTPASS
 	stty echo
 	echo ''
+fi
+if [ -z "${ROOTPASS}" ]; then
+	echo "root password for the image cannot be empty."
+	exit 1
 fi
 if [ -z "${NEWPASS}" ]; then
 	echo "New password for the image cannot be empty."
@@ -91,6 +112,7 @@ if [ -z "${USEZFS}" ]; then
 	FILETYPE='ZFS'
 fi
 
+echo checking for root credentials...
 # Check for root credentials
 if [ "$(whoami)" != "root" ]; then
 	echo "Execute as root only!"
@@ -98,6 +120,7 @@ if [ "$(whoami)" != "root" ]; then
 fi
 
 [ ${VERBOSE} ] && echo "Started at $(date '+%Y-%m-%d %r')"
+STARTTIME=$(date +%s)
 
 # Size Setup
 if [ -n "${SWAPSIZE}" ]; then
@@ -117,8 +140,13 @@ else
 	TOTALSIZE=$IMAGESIZE
 fi
 
+if [ -f temporary.img ]; then
+	echo 'temporary.img already exists; please cleanup.'
+	exit 1
+fi
+
 # Create The Image
-echo "Creating image..."
+echo "Creating image of $TOTALSIZE..."
 truncate -s "$TOTALSIZE" temporary.img
 
 # Get a device ID for the image
@@ -140,7 +168,13 @@ if [ $USEZFS ]; then
 	echo "Creating ZFS boot root partitions..."
 	gpart create -s gpt "${DEVICEID}"
 	gpart add -a 4k -s 512k -t freebsd-boot "${DEVICEID}"
-	gpart add -a 4k -t freebsd-zfs -l "${ZLABEL}" "${DEVICEID}"
+	# add swap as a separate partition instead of a Z-Vol
+	if [ -n "${SWAPSIZE}" ]; then
+		echo -n "Adding swap space..."
+		gpart add -a 1m -t freebsd-swap -l swap0 -s ${SWAPSIZE} "${DEVICEID}"
+	fi
+	# remaining space for the ZFS partition
+	gpart add -a 1m -t freebsd-zfs -l "${ZLABEL}" "${DEVICEID}"
 	gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 1 "${DEVICEID}"
 
 	echo "Creating zroot pool..."
@@ -153,40 +187,37 @@ if [ $USEZFS ]; then
 
 	echo "Setting ZFS properties..."
 	zpool set bootfs="${ZNAME}" "${ZNAME}"
-
-	if [ -n "${SWAPSIZE}" ]; then
-		echo "Adding swap space..."
-		zfs create -V "${SWAPSIZE}" "${ZNAME}/swap"
-		zfs set org.freebsd:swap=on "${ZNAME}/swap"
-	fi
+	zpool set autoexpand=on ${ZNAME}
+	zfs set checksum=on ${ZNAME}
+	zfs set compression=lz4 ${ZNAME}
+	zfs set atime=off ${ZNAME}
 
 	# Add the extra component to the path for root
-	TMPMNTPNT="${TMPMNTPNT}/${ZNAME}"
-
+	# TMPMNTPNT="${TMPMNTPNT}/${ZNAME}"
+	ROOTPATH="${TMPMNTPNT}/${ZNAME}"
 else
-
 	# Partition the image
 	echo "Adding partitions..."
 	gpart create -s gpt "/dev/${DEVICEID}"
 	printf "Adding boot: "
 	gpart add -s 222 -t freebsd-boot -l boot0 "${DEVICEID}"
+	if [ -n "${SWAPSIZE}" ]; then
+		printf "Adding swap: "
+		gpart add -t freebsd-swap -s ${SWAPSIZE} -l swap0 "${DEVICEID}"
+	fi
 	printf "Adding root: "
 	gpart add -t freebsd-ufs -l root0 "${DEVICEID}"
 	gpart bootcode -b /boot/pmbr -p /boot/gptboot -i 1 "${DEVICEID}"
-	if [ -n "${SWAPSIZE}" ]; then
-		printf "Adding swap: "
-		gpart add -t freebsd-swap -l swap0 "${DEVICEID}"
-	fi
 
 	# Create and mount file system
 	echo "Creating and mounting filesystem..."
-	newfs -U "/dev/${DEVICEID}p2"
-	mount "/dev/${DEVICEID}p2" "${TMPMNTPNT}"
-
+	newfs -U "/dev/${DEVICEID}p3"
+	mount "/dev/${DEVICEID}p3" "${TMPMNTPNT}"
+	ROOTPATH="${TMPMNTPNT}"
 fi
 
 # Fetch FreeBSD into the image
-RELEASEDIR="FETCH_${RELEASE}"
+if [ "${RELEASEDIR}" = "" ]; then RELEASEDIR="FETCH_${RELEASE}"; fi
 mkdir -p "${RELEASEDIR}"
 
 BASE_INSTALLED=''
@@ -199,10 +230,10 @@ for cmp in $COMPONENTS; do
 	else
 		if [ ! -f "${RELEASEDIR}/${cmp}.txz" ]; then
 			echo "Fetching ${cmp}..."
-			fetch -q -o "${RELEASEDIR}/${cmp}.txz" "http://ftp.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/${cmp}.txz" < /dev/tty
+			fetch -o "${RELEASEDIR}/${cmp}.txz" "http://ftp7.freebsd.org/pub/FreeBSD/releases/amd64/${RELEASE}/${cmp}.txz" < /dev/tty
 		fi
 		echo "Extracting ${cmp}..."
-		tar -C "${TMPMNTPNT}" -xpf "${RELEASEDIR}/${cmp}.txz" < /dev/tty
+		tar -C "${ROOTPATH}" -xpf "${RELEASEDIR}/${cmp}.txz" < /dev/tty
 	fi
 
 	if [ "${cmp}" = "base" ]; then BASE_INSTALLED="YES"; fi
@@ -211,23 +242,25 @@ done
 
 if [ -z "${KERNEL_INSTALLED}" ]; then
 	echo "You have ommited the kernel. Hope you know what are you doing."
+	exit 1
 fi
 
 if [ -z "${BASE_INSTALLED}" ]; then
 	echo "You have ommited the base. Good luck."
+	exit 1
 fi
 
 # ZFS on Root Configuration
 if [ $USEZFS ]; then
 	echo "Configuring for ZFS..."
-	cp "${TMPCACHE}/zpool.cache" "${TMPMNTPNT}/boot/zfs/zpool.cache"
+	cp "${TMPCACHE}/zpool.cache" "${ROOTPATH}/boot/zfs/zpool.cache"
 ## /etc/rc.conf
-cat >> "$TMPMNTPNT/etc/rc.conf" << __EOF__
+cat >> "$ROOTPATH/etc/rc.conf" << __EOF__
 # ZFS On Root
 zfs_enable="YES"
 __EOF__
 ## /boot/loader.conf
-cat >> "$TMPMNTPNT/boot/loader.conf" << __EOF__
+cat >> "$ROOTPATH/boot/loader.conf" << __EOF__
 # ZFS On Root
 vfs.root.mountfrom="zfs:${ZNAME}"
 zfs_load="YES"
@@ -238,44 +271,54 @@ kern.geom.label.gptid.enable="0"
 __EOF__
 fi
 
-# Configure the root user
-echo "$NEWPASS" | pw -V "$TMPMNTPNT/etc" usermod root -h 0
+# Configure new user
+echo "Creating ${NEWUSER} and home dir..."
+chroot ${ROOTPATH} pw useradd ${NEWUSER} -m -G wheel -s /bin/sh -h 0 <<EOPASS
+${NEWPASS}
+EOPASS
 
-if [ ! -z "${PUBKEYFILE}" ]; then
-	echo "Setting authorized ssh key for root..."
-	mkdir "$TMPMNTPNT/root/.ssh"
-	chmod -R 700 "$TMPMNTPNT/root/.ssh"
-	touch "$TMPMNTPNT/root/.ssh/authorized_keys"
-	chmod 644 "$TMPMNTPNT/root/.ssh/authorized_keys"
-	cat "${PUBKEYFILE}" > "$TMPMNTPNT/root/.ssh/authorized_keys"
-fi
+NEWUSER_HOME=$ROOTPATH/home/${NEWUSER}
+chmod 700 $NEWUSER_HOME
+
+## Set SSH authorized keys && optionally install key pair
+echo "Setting authorized ssh key for ${NEWUSER}..."
+mkdir $NEWUSER_HOME/.ssh
+chmod 700 $NEWUSER_HOME/.ssh
+cat "${PUBKEYFILE}" > $NEWUSER_HOME/.ssh/authorized_keys
+chroot ${ROOTPATH} chown -R ${NEWUSER}:${NEWUSER} /home/${NEWUSER}/.ssh
+
+# Configure the root user
+chroot ${ROOTPATH} passwd root <<EOROOTPASS
+${ROOTPASS}
+${ROOTPASS}
+EOROOTPASS
+
+mkdir -p ${ROOTPATH}/dev
+mount -t devfs devfs ${ROOTPATH}/dev
+chroot ${ROOTPATH} /etc/rc.d/ldconfig forcestart
+umount ${ROOTPATH}/dev
 
 # Config File Changes
 echo "Configuring image for GCE..."
 
 ## Create a Local etc
-mkdir "$TMPMNTPNT/usr/local/etc"
+mkdir "$ROOTPATH/usr/local/etc"
 
 ## /etc/fstab
-if [ $USEZFS ]; then
-	# touch the /etc/fstab else freebsd will not boot properly"
-	touch "$TMPMNTPNT/etc/fstab"
+if [ ${USEZFS} ]; then
+	echo '/dev/gpt/swap0	none	swap	sw	0	0' >> ${ROOTPATH}/etc/fstab
 else
-cat >> "$TMPMNTPNT/etc/fstab" << __EOF__
-/dev/da0p2	/			ufs		rw,noatime,suiddir	1	1
-__EOF__
-if [ -n "$SWAPSIZE" ]; then
-cat >> "$TMPMNTPNT/etc/fstab" << __EOF__
-/dev/da0p3	none	swap	sw									0	0
-__EOF__
+	echo '/dev/da0p2	/	ufs	rw,noatime,suiddir	1	1' >> ${ROOTPATH}/etc/fstab
+	if [ -n "$SWAPSIZE" ]; then
+		echo '/dev/da0p3	none	swap	sw		0	0' >> ${ROOTPATH}/etc/fstab
 	fi
 fi
 
 ## /boot.config
-echo -Dh > "$TMPMNTPNT/boot.config"
+echo -Dh > "$ROOTPATH/boot.config"
 
 ### /boot/loader.conf
-cat >> "$TMPMNTPNT/boot/loader.conf" << __EOF__
+cat >> "$ROOTPATH/boot/loader.conf" << __EOF__
 # GCE Console
 console="comconsole,vidconsole"
 autoboot_delay="-1"
@@ -289,51 +332,97 @@ nvme_load="YES"
 __EOF__
 
 ## /etc/rc.conf
-cat >> "$TMPMNTPNT/etc/rc.conf" << __EOF__
+cat >> "$ROOTPATH/etc/rc.conf" << __EOF__
+dumpdev="AUTO"
 console="comconsole"
-hostname="freebsd"
+hostname=${HOSTNAME}
 ifconfig_DEFAULT="SYNCDHCP mtu 1460"
 ntpd_enable="YES"
 ntpd_sync_on_start="YES"
 sshd_enable="YES"
+panicmail_autosubmit="YES"
+syslogd_flags="-ssC"
+cron_flags="-J 60"
+# below lines to be removed later - for internal testing only
+ifconfig_vtnet0="inet 10.0.0.2 netmask 255.255.255.0"
+defaultrouter="10.0.0.1"
 __EOF__
 
 ## /etc/ssh/sshd_config
-/usr/bin/sed -Ei.original 's/^#UseDNS yes/UseDNS no/' "$TMPMNTPNT/etc/ssh/sshd_config"
-/usr/bin/sed -Ei '' 's/^#UsePAM yes/UsePAM no/' "$TMPMNTPNT/etc/ssh/sshd_config"
-/usr/bin/sed -Ei '' 's/^#PermitRootLogin no/PermitRootLogin without-password/' "$TMPMNTPNT/etc/ssh/sshd_config"
+#/usr/bin/sed -Ei.original 's/^#UseDNS yes/UseDNS no/' "$ROOTPATH/etc/ssh/sshd_config"
+#/usr/bin/sed -Ei '' 's/^#UsePAM yes/UsePAM no/' "$ROOTPATH/etc/ssh/sshd_config"
+#/usr/bin/sed -Ei '' 's/^#PermitRootLogin no/PermitRootLogin without-password/' "$ROOTPATH/etc/ssh/sshd_config"
+cat >> ${ROOTPATH}/etc/ssh/sshd_config << EOF
+PermitRootLogin no
+ChallengeResponseAuthentication no
+X11Forwarding no
+Ciphers aes128-ctr,aes192-ctr,aes256-ctr,arcfour256,arcfour128,aes128-cbc,3des-cbc
+AllowAgentForwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 0
+EOF
 
 ## /etc/ntp.conf > /usr/local/etc/ntp.conf
-cp "$TMPMNTPNT/etc/ntp.conf" "$TMPMNTPNT/usr/local/etc/ntp.conf"
-/usr/bin/sed -Ei.original 's/^server/#server/' "$TMPMNTPNT/usr/local/etc/ntp.conf"
-cat >> "$TMPMNTPNT/etc/ntp.conf" << __EOF__
+cp "$ROOTPATH/etc/ntp.conf" "$ROOTPATH/etc/ntp.conf.orig"
+cat >> "$ROOTPATH/etc/ntp.conf" << __EOF__
 # GCE NTP Server
 server 169.254.169.254 burst iburst
+# setup the drift file
+driftfile /var/db/ntp.drift
+# not accessible by any other host
+restrict default ignore
 __EOF__
 
 ## /etc/dhclient.conf
-cat >> "$TMPMNTPNT/etc/dhclient.conf" << __EOF__
+cat >> "$ROOTPATH/etc/dhclient.conf" << __EOF__
 # GCE DHCP Client
 interface "vtnet0" {
   supersede subnet-mask 255.255.0.0;
 }
 __EOF__
 
-## /etc/rc.local
-cat > "$TMPMNTPNT/etc/rc.local" << __EOF__
-# GCE MTU
-ifconfig vtnet0 mtu 1460
-__EOF__
+## /etc/sysctl.conf
+cat >> ${ROOTPATH}/etc/sysctl.conf << EOF
+kern.ipc.somaxconn=1024
+debug.trace_on_panic=1
+debug.debugger_on_panic=0
+net.inet.tcp.blackhole=2                        # drop tcp packets destined for closed ports (default 0)
+net.inet.udp.blackhole=1                        # drop udp packets destined for closed sockets(default 0)
+net.inet.sctp.blackhole=2                       # drop stcp packets destined for closed ports (default 0)
+net.inet.icmp.drop_redirect=1                   # no redirected ICMP packets (default 0)
+net.inet.ip.redirect=0                          # do not send IP redirects (default 1)
+net.inet.ip.sourceroute=0                       # if source routed packets are accepted the route data is ignored (default 0)
+net.inet.ip.accept_sourceroute=0                # drop source routed packets since they can not be trusted (default 0)
+net.inet.icmp.bmcastecho=0                      # do not respond to ICMP packets sent to IP broadcast addresses (default 0)
+EOF
 
-## Time Zone
-chroot "$TMPMNTPNT" /bin/sh -c 'ln -s /usr/share/zoneinfo/America/Vancouver /etc/localtime'
+## /etc/periodic.conf.local
+cat >> ${ROOTPATH}/etc/periodic.conf.local << _EOF_
+daily_status_security_enable="NO"
+daily_status_security_inline="YES"
+weekly_status_security_inline="YES"
+# bruteforce ssh is a reality; reduce the noise
+security_status_loginfail_enable="NO"
+#weekly_local="/root/bin/weekly.sh"
+# Enable in case weekly scrub is needed for ZFS
+#daily_scrub_zfs_enable="YES"
+_EOF_
+
+
+## XXX Time Zone
+##chroot "$ROOTPATH" /bin/sh -c 'ln -s /usr/share/zoneinfo/America/Vancouver /etc/localtime'
+
+## /etc/resolv.conf
+# No need to delete this, dhclient will re-write
+cat > ${ROOTPATH}/etc/resolv.conf << EOF
+echo "nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOF
 
 ## Install packages
 if [ -n "$PACKAGES" ]; then
 	echo "Installing packages..."
-	chroot "$TMPMNTPNT" /bin/sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
-	pkg -c "$TMPMNTPNT" install -y "${PACKAGES}"
-	chroot "$TMPMNTPNT" /bin/sh -c 'rm /etc/resolv.conf'
+	pkg -c "$ROOTPATH" install -y ${PACKAGES}
 fi
 
 # Clean up image infrastructure
@@ -342,7 +431,7 @@ if [ $USEZFS ]; then
 	zfs unmount "${ZNAME}"
 	zpool export "${ZNAME}"
 else
-	umount "$TMPMNTPNT"
+	umount "$ROOTPATH"
 fi
 mdconfig -d -u "${DEVICEID}"
 
@@ -364,5 +453,19 @@ if [ ${COMPRESS} ]; then
 fi
 
 [ ${VERBOSE} ] && echo "Finished at $(date '+%Y-%m-%d %r')"
-
+ENDTIME=$(date +%s)
+echo -n "Total time taken: "
+echo $(echo $ENDTIME '-' $STARTTIME | bc) "seconds"
 echo "Done."
+
+echo files in ${TMPMNTPNT}
+find ${TMPMNTPNT} -print
+echo files in ${TMPCACHE}
+find ${TMPCACHE} -print
+rmdir ${TMPMNTPNT}
+#rm ${TMPCACHE}/zpool.cache
+#rmdir ${TMPCACHE}
+# should Cleanup be done
+# umount stuff
+# delete tmpmntdir and tmpcachedir
+# delete md device
